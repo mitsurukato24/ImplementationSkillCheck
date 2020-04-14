@@ -9,8 +9,10 @@ int main()
 	cv::Mat img = cv::imread(filename);
 	if (img.empty()) return -1;
 
-	cv::cvtColor(img, img, cv::COLOR_RGB2BGR);
+	cv::Mat imgRGB;
+	cv::cvtColor(img, imgRGB, cv::COLOR_BGR2RGB);
 
+	cv::hconcat(std::vector<cv::Mat>{img, imgRGB}, img);
 	cv::imshow("Task 4", img);
 	cv::waitKey(0);
 
