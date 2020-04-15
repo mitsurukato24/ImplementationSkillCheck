@@ -7,25 +7,23 @@
 int main()
 {
 	// Task 12
-	cv::VideoCapture cap(0);  // use web camera not attached in laptop
+	cv::VideoCapture cap(0);
 	if (!cap.isOpened()) return -1;
 	// use Logicool C910
 	cap.set(cv::CAP_PROP_AUTOFOCUS, 0);
-	cap.set(cv::CAP_PROP_FPS, 30);
 	cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
 	cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
-	cap.set(cv::CAP_PROP_FOCUS, 7);
-
+	int paramFocus = 15;
+	cap.set(cv::CAP_PROP_FOCUS, paramFocus);  // 0~255
+	
 	enum Pattern {CHESSBOARD, CIRCLES_GRID, ASYMMETRIC_CIRCLES_GRID};
 	Pattern calibrationPattern = CHESSBOARD;
 
 	cv::Mat frame;
-	std::vector<std::vector<cv::Point2f> > imagePts;
+	std::vector<std::vector<cv::Point2f> > cornerPts;  // corner points in image coordinates
 
 	const cv::Size boardSize(10, 7);
 	const float chessSize = 24.0;
-	const float gridWidth = chessSize*(boardSize.width - 1);
-	int chessBoardFlags = cv::CALIB_CB_FAST_CHECK | cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE;
 
 	int minNumFrames = 10;
 	while (true)
@@ -33,65 +31,57 @@ int main()
 		cap >> frame;
 
 		bool found;
-		std::vector<cv::Point2f> pointBuf;
+		std::vector<cv::Point2f> bufCornerPts;
 		if (calibrationPattern == CHESSBOARD)
 		{
-			found = cv::findChessboardCorners(frame, boardSize, pointBuf, chessBoardFlags);
-			std::cout << found << std::endl;
+			int chessBoardFlags = cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE;
+			found = cv::findChessboardCorners(frame, boardSize, bufCornerPts, chessBoardFlags);
 		}
 		else if (calibrationPattern == CIRCLES_GRID)
 		{
-			found = cv::findCirclesGrid(frame, boardSize, pointBuf);
+			found = cv::findCirclesGrid(frame, boardSize, bufCornerPts);
 		}
 		else if (calibrationPattern == ASYMMETRIC_CIRCLES_GRID)
 		{
-			found = cv::findCirclesGrid(frame, boardSize, pointBuf, cv::CALIB_CB_ASYMMETRIC_GRID);
+			found = cv::findCirclesGrid(frame, boardSize, bufCornerPts, cv::CALIB_CB_ASYMMETRIC_GRID);
 		}
 
 		if (found)
 		{
 			if (calibrationPattern == CHESSBOARD)
 			{
-				// the detected position is not accurate so use FindCornerSubPix to improve accuracy
+				// the detected position is not accurate so use CornerSubPix to improve accuracy
 				cv::Mat frameGray;
 				cv::cvtColor(frame, frameGray, cv::COLOR_BGR2GRAY);
 				int winSize = 11;  // half of search window
-				cv::TermCriteria termCriteia(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.0001);
-				cv::cornerSubPix(frameGray, pointBuf, cv::Size(winSize, winSize), cv::Size(-1, -1), termCriteia);
+				cv::TermCriteria termCriteia(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 50, 0.0001);
+				cv::cornerSubPix(frameGray, bufCornerPts, cv::Size(winSize, winSize), cv::Size(-1, -1), termCriteia);
 			}
 
-			cv::drawChessboardCorners(frame, boardSize, cv::Mat(pointBuf), found);
+			cv::drawChessboardCorners(frame, boardSize, cv::Mat(bufCornerPts), found);
 			cv::imshow("calibration", frame);
-			int key = cv::waitKey(5);
-			if (key == ESC_KEY)
-			{
-				break;
-			}
+			int key = cv::waitKey(1);
+			if (key == ESC_KEY) break;
 			else if (key == SPACE_KEY)
 			{
 				cv::imshow("show picked image", frame);
 				int k = cv::waitKey(0);
-				if (k == SPACE_KEY)
-				{
-					imagePts.push_back(pointBuf);
-				}
+				if (k == SPACE_KEY) cornerPts.push_back(bufCornerPts);
 			}
 		}
 		else
 		{
 			cv::imshow("calibration", frame);
-			int key = cv::waitKey(5);
-			if (key == ESC_KEY)
-			{
-				break;
-			}
+			int key = cv::waitKey(1);
+			if (key == ESC_KEY) break;
 		}
 	}
 
-	if ((int)imagePts.size() >= minNumFrames)
+	// --- calculate intrinsic and extrinsic parameters
+	if ((int)cornerPts.size() >= minNumFrames)
 	{
 		std::vector<cv::Point3f> newObjPts;
-		std::vector<std::vector<cv::Point3f>> objPts(1);
+		std::vector<std::vector<cv::Point3f>> objPts(1);  // true 3d coordinates of corners
 		for (int h = 0; h < boardSize.height; h++)
 		{
 			for (int w = 0; w < boardSize.width; w++)
@@ -100,16 +90,28 @@ int main()
 			}
 		}
 		newObjPts = objPts[0];
-		objPts.resize(imagePts.size(), objPts[0]); // copy
-
+		objPts.resize(cornerPts.size(), objPts[0]); // copy
 		std::vector<cv::Mat> rvecs, tvecs;
 		cv::Mat cameraMat = cv::Mat::eye(3, 3, CV_64F);
 		cv::Mat distCoeff = cv::Mat::zeros(8, 1, CV_64F);
-		cv::Size imageSize = frame.size();
-		int iFixedPt = boardSize.width - 1;
-		double rms = cv::calibrateCameraRO(
-			objPts, imagePts, imageSize, iFixedPt, cameraMat, distCoeff,
-			rvecs, tvecs, newObjPts, cv::CALIB_FIX_K3 | cv::CALIB_USE_LU);
+		cv::Size imgSize = frame.size();
+		bool useCalibrateCameraRO = true;
+		double rms;
+		if (useCalibrateCameraRO)
+		{
+			// more accurate
+			int iFixedPt = boardSize.width - 1;
+			rms = cv::calibrateCameraRO(
+				objPts, cornerPts, imgSize, iFixedPt, cameraMat, distCoeff,
+				rvecs, tvecs, newObjPts
+			);
+		}
+		else
+		{
+			rms = cv::calibrateCamera(
+				objPts, cornerPts, imgSize, cameraMat, distCoeff, rvecs, tvecs
+			);
+		}
 		std::cout << "RMS error reported by calibrateCamera: " << rms << std::endl;
 
 		if (!(cv::checkRange(cameraMat) && cv::checkRange(distCoeff)))
@@ -118,17 +120,18 @@ int main()
 			return -1;
 		}
 
+		// --- caliculate avg reprojection error
 		objPts.clear();
-		objPts.resize(imagePts.size(), newObjPts);
+		objPts.resize(cornerPts.size(), newObjPts);
 		double totalErr = 0, err;
 		int totalPts = 0;
 		std::vector<float> reprojErrs;
-		std::vector<cv::Point2f> tmpImagePts;
+		std::vector<cv::Point2f> tmpImgPts;
 		reprojErrs.resize(objPts.size());
 		for (int i = 0; i < (int)objPts.size(); i++)
 		{
-			cv::projectPoints(cv::Mat(objPts[i]), rvecs[i], tvecs[i], cameraMat, distCoeff, tmpImagePts);
-			err = cv::norm(cv::Mat(imagePts[i]), cv::Mat(tmpImagePts), cv::NORM_L2);
+			cv::projectPoints(cv::Mat(objPts[i]), rvecs[i], tvecs[i], cameraMat, distCoeff, tmpImgPts);
+			err = cv::norm(cv::Mat(cornerPts[i]), cv::Mat(tmpImgPts), cv::NORM_L2);
 			int n = (int)objPts[i].size();
 			reprojErrs[i] = (float)std::sqrt(err*err / n);
 			totalErr += err*err;
@@ -137,15 +140,25 @@ int main()
 		double totalAvgErr = std::sqrt(totalErr / totalPts);
 		printf("Calibration succeeded, avg reprojection error = %.7f\n", totalAvgErr);
 
-		std::string filename = "output_camera_data.yml";
+		// --- save as yml file
+		time_t now = time(nullptr);
+		struct tm pnow;
+		localtime_s(&pnow, &now);
+		char date[50];
+		sprintf_s(date, "%02d%02d%02d%02d%02d", pnow.tm_mon + 1,
+			pnow.tm_mday, pnow.tm_hour, pnow.tm_min, pnow.tm_sec);
+
+		std::string filename = "output_camera_data_" + std::string(date) + ".yml";
 		cv::FileStorage fs(filename, cv::FileStorage::WRITE);
 		if (!fs.isOpened())
 		{
 			std::cout << "File can not be opened. " << std::endl;
 			return -1;
 		}
-		fs << "image_width" << imageSize.width;
-		fs << "image_height" << imageSize.height;
+		fs << "calibration_time" << date;
+		fs << "camera_focus_parameter" << paramFocus;
+		fs << "image_width" << imgSize.width;
+		fs << "image_height" << imgSize.height;
 		fs << "board_width" << boardSize.width;
 		fs << "board_height" << boardSize.height;
 		fs << "cell_size" << chessSize;
@@ -158,11 +171,11 @@ int main()
 
 		fs.release();
 
-		// show undistorted images
+		// --- show undistorted images
 		cv::Mat map1, map2;
 		cv::initUndistortRectifyMap(cameraMat, distCoeff, cv::Mat(),
-			cv::getOptimalNewCameraMatrix(cameraMat, distCoeff, imageSize, 1, imageSize, 0),
-			imageSize, CV_16SC2, map1, map2);
+			cv::getOptimalNewCameraMatrix(cameraMat, distCoeff, imgSize, 1, imgSize, 0),
+			imgSize, CV_16SC2, map1, map2);
 
 		cv::Mat frameUndistorted;
 		while (true)
@@ -172,11 +185,8 @@ int main()
 			cv::resize(frame, frame, frameUndistorted.size());
 			cv::hconcat(std::vector<cv::Mat>{ frame, frameUndistorted }, frame);
 			cv::imshow("undistortion", frame);
-			int kk = cv::waitKey(5);
-			if (kk == ESC_KEY)
-			{
-				break;
-			}
+			int kk = cv::waitKey(1);
+			if (kk == ESC_KEY) break;
 		}
 	}
 	else
